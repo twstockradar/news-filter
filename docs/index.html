@@ -1,0 +1,58 @@
+<!DOCTYPE html>
+<html lang="zh-Hant">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>每日選聞 — 台股新聞篩選</title>
+<meta name="description" content="每日台股新聞,依內文重點與公司高層發言交集篩選。">
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='6' fill='%23bf3a1e'/%3E%3Ctext x='16' y='23' font-size='18' text-anchor='middle' fill='%23f6f1e7' font-family='serif' font-weight='bold'%3E選%3C/text%3E%3C/svg%3E">
+<link rel="stylesheet" href="styles.css">
+</head>
+<body>
+
+<header class="masthead">
+  <div class="masthead-rule"></div>
+  <div class="masthead-inner">
+    <div class="masthead-left">
+      <h1>每日選聞</h1>
+      <p class="slogan">內文重點 × 公司高層 交集篩選</p>
+    </div>
+    <div class="masthead-right">
+      <p id="updated-at" class="meta-line"></p>
+      <p class="meta-line">資料來源:鉅亨網</p>
+    </div>
+  </div>
+  <div class="masthead-rule thick"></div>
+</header>
+
+<main>
+  <section class="controls">
+    <div class="search-row">
+      <input id="search" type="search" placeholder="搜尋族群/關鍵字,例:伺服器、散熱、機器人…" autocomplete="off">
+      <button id="clear-filters" class="clear-btn" hidden>清除篩選 ✕</button>
+    </div>
+    <div id="cat-filters" class="chip-row"></div>
+  </section>
+
+  <nav class="weeknav">
+    <button id="week-prev" class="week-arrow" aria-label="上一週">‹</button>
+    <div class="week-center">
+      <div id="week-label" class="week-label"></div>
+      <div id="day-strip" class="day-strip"></div>
+    </div>
+    <button id="week-next" class="week-arrow" aria-label="下一週">›</button>
+  </nav>
+
+  <div id="result-count" class="result-count"></div>
+  <div id="news-list"></div>
+</main>
+
+<footer>
+  <p>新聞著作權屬原媒體所有,本站僅整理標題、摘要與連結。內容僅供參考,非投資建議。</p>
+</footer>
+
+<noscript><p style="text-align:center;padding:2rem">本頁需要啟用 JavaScript。</p></noscript>
+<script src="data.js"></script>
+<script src="app.js"></script>
+</body>
+</html>
