@@ -1,6 +1,10 @@
 """
-NewsFilter — 抓鉅亨網(cnyes)台股新聞,依「內文重點(7類) × 公司高層」交集條件過濾,
+NewsFilter — 抓台股新聞,依「內文重點(7類) × 公司高層」交集條件過濾,
 輸出 docs/data.js 給靜態網頁使用。
+
+來源(raw 項目以 src 欄位區分,缺省視為 cnyes):
+  - cnyes:鉅亨網台股新聞列表 API(附全文,增量抓取)
+  - mops:證交所/櫃買「重大訊息」OpenAPI(官方公告全文,每日快照輪詢)
 
 流程:
   1. 抓新聞(增量)→ 全部原始文章累積存 data/raw.json(gitignored)
@@ -16,6 +20,7 @@ NewsFilter — 抓鉅亨網(cnyes)台股新聞,依「內文重點(7類) × 公�
     FETCH_OLDER_DAYS=N     一次性往回回補 N 天(需已有資料)
 """
 
+import hashlib
 import html
 import json
 import os
@@ -45,6 +50,13 @@ KEYWORDS_JSON = os.path.join(BASE, "keywords.json")
 
 LOCAL_TZ = ZoneInfo("Asia/Taipei")
 API = "https://api.cnyes.com/media/api/v1/newslist/category/tw_stock"
+# 重大訊息(公開資訊觀測站)官方 OpenAPI:回傳「每日快照」(實測為前一日全天的公告),
+# 不支援歷史區間查詢,靠每小時輪詢 + id 去重累積;日期為民國紀年。
+MOPS_APIS = [
+    ("上市", "https://openapi.twse.com.tw/v1/opendata/t187ap04_L"),
+    ("上櫃", "https://www.tpex.org.tw/openapi/v1/mopsfin_t187ap04_O"),
+]
+MOPS_LINK = "https://mops.twse.com.tw/mops/#/web/t05st01"  # 無單篇固定網址,一律導 MOPS 查詢頁
 HEADERS = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)"}
 INITIAL_DAYS = int(os.getenv("INITIAL_DAYS", "30"))
 PAGE_LIMIT = 30
@@ -212,6 +224,7 @@ def slim_raw(item):
     nid = item["newsId"]
     return {
         "id": nid,
+        "src": "cnyes",
         "publishAt": item.get("publishAt"),
         "title": html.unescape(item.get("title") or ""),
         "text": clean_text(item.get("content")),
@@ -223,10 +236,105 @@ def slim_raw(item):
     }
 
 
+# ---------------------------------------------------------------- 重大訊息(MOPS)
+
+# 「說明」是制式表格文字(1.事實發生日:… 2.公司名稱:…),這些樣板欄位不進摘要
+MOPS_SKIP_FIELDS = ("事實發生日", "公司名稱", "與公司關係", "相互持股比例",
+                    "發言日期", "發言時間", "出表日期")
+MOPS_SEG_RE = re.compile(r"\s*\d+\s*\.")
+MOPS_EMPTY_VALUES = {"", "不適用", "不適用。", "無", "無。", "NA", "N/A"}
+# 制式公告幾乎必含主管機關名與「依〇〇法/辦法規定」(核准文號等公文套語),
+# 在公告語境不代表政策題材,條件 A 比對時忽略;真正的政策公告會命中補助/關稅等實質詞
+MOPS_A_IGNORE = {"經濟部", "金管會", "行政院", "央行", "法規", "政策", "條例", "法案"}
+
+
+def roc_to_epoch(roc_date, roc_time):
+    """民國紀年日期(1150611)+ 時間(94428,長度不定、不補零)→ epoch 秒;解析失敗回 None。"""
+    d = re.sub(r"\D", "", str(roc_date or ""))
+    if len(d) < 6:
+        return None
+    t = re.sub(r"\D", "", str(roc_time or "")).zfill(6)
+    try:
+        return int(datetime(
+            int(d[:-4]) + 1911, int(d[-4:-2]), int(d[-2:]),
+            int(t[:2]), int(t[2:4]), int(t[4:6]), tzinfo=LOCAL_TZ,
+        ).timestamp())
+    except (ValueError, OverflowError):
+        return None
+
+
+def mops_summary(desc):
+    """去掉「說明」裡的樣板欄位與空值,留下有資訊量的段落(發生緣由、因應措施等)。"""
+    parts = []
+    for seg in MOPS_SEG_RE.split(desc):
+        seg = WS_RE.sub(" ", seg).strip()
+        if not seg:
+            continue
+        bits = re.split(r"[::]", seg, 1)
+        label, value = (bits[0].strip(), bits[1].strip()) if len(bits) == 2 else ("", seg)
+        if any(label.startswith(p) for p in MOPS_SKIP_FIELDS):
+            continue
+        if value in MOPS_EMPTY_VALUES:
+            continue
+        parts.append(f"{label}:{value}" if label else value)
+    return " ".join(parts)
+
+
+def fetch_mops(seen_ids):
+    """抓上市/上櫃重大訊息每日快照,轉成與 cnyes 相同的通用欄位。
+    單邊失敗只略過該邊,不影響另一邊與 cnyes 主流程。"""
+    out = []
+    for market, url in MOPS_APIS:
+        try:
+            r = requests.get(url, headers=HEADERS, timeout=30)
+            r.raise_for_status()
+            data = r.json()
+        except Exception as e:
+            print(f"  ! 重大訊息({market})抓取失敗,本次略過:{e}")
+            continue
+        n = 0
+        for item in data:
+            it = {k.strip(): v for k, v in item.items()}  # TWSE 的「主旨 」鍵帶尾空白
+            code = (it.get("公司代號") or it.get("SecuritiesCompanyCode") or "").strip()
+            name = (it.get("公司名稱") or it.get("CompanyName") or "").strip()
+            subj = WS_RE.sub(" ", it.get("主旨") or "").strip()
+            desc = it.get("說明") or ""
+            ts = roc_to_epoch(it.get("發言日期"), it.get("發言時間"))
+            if not code or not subj or ts is None:
+                continue
+            # id 用內容指紋而非發言時間:快照若修正時間欄位,不會變成新的一筆
+            digest = hashlib.md5(f"{subj}|{desc[:200]}".encode("utf-8")).hexdigest()[:8]
+            date_digits = re.sub(r"\D", "", str(it.get("發言日期") or ""))
+            nid = f"mops-{code}-{date_digits}-{digest}"
+            if nid in seen_ids:
+                continue
+            seen_ids.add(nid)
+            out.append({
+                "id": nid,
+                "src": "mops",
+                "publishAt": ts,
+                "title": f"{name}:{subj}",
+                "text": WS_RE.sub(" ", desc).strip(),
+                "summary": mops_summary(desc),
+                # tags 留空:固定標籤會讓同公司同日的不同公告被去重規則 B 黏在一起
+                "tags": [],
+                # 代號放第一個(去重規則靠首字是數字認台股代號,需與 cnyes 的純代號格式互通)
+                "stocks": [code, name],
+                "cover": None,
+                "url": MOPS_LINK,
+            })
+            n += 1
+        print(f"  重大訊息({market}):快照 {len(data)} 筆,新增 {n} 筆")
+    return out
+
+
 def load_raw():
     if os.path.exists(RAW_JSON):
         with open(RAW_JSON, "r", encoding="utf-8") as f:
-            return json.load(f)
+            raw = json.load(f)
+        for it in raw["items"]:
+            it.setdefault("src", "cnyes")  # 多來源之前的舊存檔沒有 src 欄位
+        return raw
     return {"items": []}
 
 
@@ -240,23 +348,32 @@ def save_raw(raw):
 def build_filtered(raw_items, rules):
     """套 A∧B 條件 + 相似去重,回傳給前端的精簡項目(時間正序)。"""
     kept = []
-    for it in sorted(raw_items, key=lambda x: (x["publishAt"] or 0, x["id"])):
+    for it in sorted(raw_items, key=lambda x: (x["publishAt"] or 0, str(x["id"]))):  # id 跨來源混 int/str
         title = it["title"]
         text = it["text"]
         full = title + "\n" + text
 
-        # 條件 A:七類內文重點,任一類命中即可(可多類)
+        # 條件 A:七類內文重點,任一類命中即可(可多類)。
+        # mops 的「說明」滿是官樣文字(依〇〇法規定、業經經濟部核准等),
+        # 直接掃會大量誤中 policy 類,所以只掃主旨+去樣板摘要
+        is_mops = it.get("src") == "mops"
+        a_text = title + "\n" + (it["summary"] or "") if is_mops else full
         hits = {}
         for key, cat in rules["cats"].items():
-            h = find_hits(full, cat["words"])
+            h = find_hits(a_text, cat["words"])
+            if is_mops:
+                h = [w for w in h if w not in MOPS_A_IGNORE]
             if h:
                 hits[key] = h
         if not hits:
             continue
 
-        # 條件 B:內文出現高層六詞,或標題帶「澄清」
+        # 條件 B:內文出現高層六詞,或標題帶「澄清」;
+        # 重大訊息(mops)本身就是公司正式發言,視同滿足來源條件
         src_hits = find_hits(text, rules["src_words"])
         title_hits = find_hits(title, rules["src_title_words"])
+        if it.get("src") == "mops" and not src_hits and not title_hits:
+            src_hits = ["公司公告"]
         if not src_hits and not title_hits:
             continue
 
@@ -269,6 +386,7 @@ def build_filtered(raw_items, rules):
             summary = summary[:SUMMARY_MAX].rstrip() + "…"
         kept.append({
             "id": it["id"],
+            "origin": it.get("src", "cnyes"),  # 注意:輸出的 "src" 是條件 B 命中詞,來源用 origin
             "title": title,
             "url": it["url"],
             "date": dt.strftime("%Y-%m-%d"),
@@ -336,7 +454,8 @@ def write_data_js(items, rules):
     """有變化才寫檔;回傳是否有寫。"""
     payload = {
         "tz": "Asia/Taipei",
-        "source": "鉅亨網",
+        "source": "鉅亨網・公開資訊觀測站",
+        "origin_labels": {"cnyes": "鉅亨網", "mops": "重大訊息"},
         "cat_labels": cat_labels(rules),
         "src_label": rules["src_label"],
         "items": items,
@@ -361,23 +480,26 @@ def main():
     now = int(time.time())
 
     if not rescan:
+        # cnyes 的增量游標只看 cnyes 自己的項目(mops 公告的時間戳不該推動 cnyes 區間)
+        cn_items = [it for it in items if it.get("src", "cnyes") == "cnyes"]
         older_days = int(os.getenv("FETCH_OLDER_DAYS") or 0)
         if older_days:
-            if not items:
+            if not cn_items:
                 print("✗ 沒有既有資料;請先正常跑一次 fetch_news.py。")
                 return
-            oldest = min(it["publishAt"] for it in items)
+            oldest = min(it["publishAt"] for it in cn_items)
             start, end = oldest - older_days * 86400, oldest
             print(f"→ 往回回補 {older_days} 天…")
-        elif items:
-            newest = max(it["publishAt"] for it in items)
+        elif cn_items:
+            newest = max(it["publishAt"] for it in cn_items)
             start, end = newest - 7200, now  # 2 小時重疊緩衝,防漏
             print("→ 增量更新…")
         else:
             start, end = now - INITIAL_DAYS * 86400, now
             print(f"→ 初次回補最近 {INITIAL_DAYS} 天…")
         new_items = fetch_range(start, end, seen_ids)
-        print(f"✓ 本次新抓 {len(new_items)} 則(原始)")
+        print(f"✓ 本次新抓 {len(new_items)} 則(鉅亨網)")
+        new_items += fetch_mops(seen_ids)  # 重大訊息只有當日快照,無區間可回補
         if new_items:
             items.extend(new_items)
             save_raw(raw)

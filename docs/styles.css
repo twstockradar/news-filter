@@ -226,6 +226,12 @@ main { max-width: 860px; margin: 0 auto; padding: 0 16px 48px; }
   display: flex; flex-wrap: wrap; gap: 8px;
 }
 .card-meta .stock { color: var(--ink-soft); }
+.card-meta .origin {
+  color: var(--ink-soft);
+  border: 1px solid currentColor;
+  border-radius: 2px;
+  padding: 0 5px;
+}
 
 .hit-row { display: flex; flex-wrap: wrap; gap: 5px; margin-top: 8px; }
 .hit {

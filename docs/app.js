@@ -4,6 +4,7 @@
 
   var DATA = window.NEWS_DATA || { items: [], cat_labels: {}, src_label: "公司高層" };
   var CAT_LABELS = DATA.cat_labels || {};
+  var ORIGIN_LABELS = DATA.origin_labels || {};
   var CAT_KEYS = Object.keys(CAT_LABELS);
   var ITEMS = (DATA.items || []).slice().sort(function (a, b) { return b.ts - a.ts; });
   var DOW = ["一", "二", "三", "四", "五", "六", "日"];
@@ -54,7 +55,8 @@
       var hitWords = [];
       CAT_KEYS.forEach(function (k) { if (it.hits[k]) hitWords = hitWords.concat(it.hits[k]); });
       it._blob = (it.title + " " + (it.tags || []).join(" ") + " " + (it.stocks || []).join(" ") +
-        " " + (it.summary || "") + " " + hitWords.join(" ")).toLowerCase();
+        " " + (it.summary || "") + " " + hitWords.join(" ") +
+        " " + (ORIGIN_LABELS[it.origin] || "")).toLowerCase();
     }
     return it._blob;
   }
@@ -161,6 +163,8 @@
       ? '<span class="hit exec">' + esc(DATA.src_label) + ":" + esc(srcWords.join("、")) + "</span>" : "";
     var stocks = (it.stocks || []).length
       ? '<span class="stock">' + esc(it.stocks.join(" ")) + "</span>" : "";
+    var origin = (it.origin && it.origin !== "cnyes" && ORIGIN_LABELS[it.origin])
+      ? '<span class="origin">' + esc(ORIGIN_LABELS[it.origin]) + "</span>" : "";
     var thumb = it.cover
       ? '<a class="thumb" href="' + esc(it.url) + '" target="_blank" rel="noopener">' +
         '<img src="' + esc(it.cover) + '" alt="" loading="lazy" onerror="this.parentNode.style.display=\'none\'"></a>'
@@ -176,7 +180,7 @@
     return '<article class="news-card" style="--cat:var(--c-' + mainCat + ')">' +
       '<div class="card-body">' +
       '<h3 class="card-title"><a href="' + esc(it.url) + '" target="_blank" rel="noopener">' + esc(it.title) + "</a></h3>" +
-      '<div class="card-meta"><span>' + esc(it.time) + "</span>" + stocks + "</div>" +
+      '<div class="card-meta"><span>' + esc(it.time) + "</span>" + origin + stocks + "</div>" +
       '<div class="hit-row">' + hitChips + srcChips + "</div>" +
       (it.summary ? '<p class="card-summary">' + esc(it.summary) + "</p>" : "") +
       dupes +
